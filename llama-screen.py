@@ -45,6 +45,15 @@ class ActiveWindow:
     window_id: Optional[int] = None
 
 
+@dataclass
+class OCRResult:
+    text: str
+    lines: list[dict]
+    app: str
+    title: str
+    screenshot: str
+
+
 def run_osascript(script: str) -> str:
     result = subprocess.run(
         ["osascript", "-e", script],
@@ -209,6 +218,86 @@ def capture_screenshot(window: ActiveWindow, out_dir: Path, allow_full_screen: b
             f"stderr={result.stderr.strip()!r}"
         )
     return path
+
+
+def load_vision_frameworks():
+    try:
+        import Foundation  # type: ignore
+        import Vision  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "Local OCR requires Apple's Vision framework through PyObjC. "
+            "Install it with: python3 -m pip install pyobjc-framework-Vision pyobjc-framework-Quartz"
+        ) from exc
+    return Foundation, Vision
+
+
+def vision_ocr_image(
+    image_path: Path,
+    recognition_level: str = "fast",
+    languages: Optional[list[str]] = None,
+    language_correction: bool = True,
+) -> tuple[str, list[dict]]:
+    Foundation, Vision = load_vision_frameworks()
+
+    image_url = Foundation.NSURL.fileURLWithPath_(str(image_path))
+    request = Vision.VNRecognizeTextRequest.alloc().init()
+
+    level_name = "VNRequestTextRecognitionLevelAccurate" if recognition_level == "accurate" else "VNRequestTextRecognitionLevelFast"
+    if hasattr(Vision, level_name):
+        request.setRecognitionLevel_(getattr(Vision, level_name))
+    if languages:
+        request.setRecognitionLanguages_(languages)
+    if hasattr(request, "setUsesLanguageCorrection_"):
+        request.setUsesLanguageCorrection_(language_correction)
+
+    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(image_url, {})
+    ok, error = handler.performRequests_error_([request], None)
+    if not ok:
+        raise RuntimeError(f"Vision OCR failed: {error}")
+
+    lines = []
+    for observation in request.results() or []:
+        candidates = observation.topCandidates_(1)
+        if not candidates:
+            continue
+        candidate = candidates[0]
+        text = str(candidate.string()).strip()
+        if not text:
+            continue
+        lines.append(
+            {
+                "text": text,
+                "confidence": float(candidate.confidence()),
+            }
+        )
+
+    text = "\n".join(line["text"] for line in lines)
+    return text, lines
+
+
+def read_active_window_text(args: argparse.Namespace) -> OCRResult:
+    window = get_active_window_metadata()
+    with tempfile.TemporaryDirectory(prefix="cronsnap-ocr-") as tmp:
+        image_path = capture_screenshot(
+            window,
+            Path(tmp),
+            allow_full_screen=args.allow_full_screen_capture,
+        )
+        text, lines = vision_ocr_image(
+            image_path,
+            recognition_level=args.recognition_level,
+            languages=args.language,
+            language_correction=not args.no_language_correction,
+        )
+
+        screenshot = ""
+        if args.keep_screenshot:
+            args.keep_screenshot.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(image_path, args.keep_screenshot)
+            screenshot = str(args.keep_screenshot)
+
+    return OCRResult(text=text, lines=lines, app=window.app, title=window.title, screenshot=screenshot)
 
 
 def post_json(url: str, payload: dict, timeout: float) -> dict:
@@ -671,6 +760,37 @@ def add_report_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", type=Path, default=None, help="Markdown report path. Use '-' for stdout.")
 
 
+def add_ocr_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--recognition-level",
+        choices=["fast", "accurate"],
+        default="fast",
+        help="Use fast OCR for low latency or accurate OCR for harder text.",
+    )
+    parser.add_argument(
+        "--language",
+        action="append",
+        help="Recognition language tag, such as en-US. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--no-language-correction",
+        action="store_true",
+        help="Disable Vision language correction.",
+    )
+    parser.add_argument(
+        "--allow-full-screen-capture",
+        action="store_true",
+        help="Allow fallback to full-screen screenshots if active-window capture is unavailable.",
+    )
+    parser.add_argument(
+        "--keep-screenshot",
+        type=Path,
+        help="Copy the captured active-window screenshot to this path for debugging.",
+    )
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--output", type=Path, default=Path("-"), help="OCR output path. Use '-' for stdout.")
+
+
 def run_watch(args: argparse.Namespace) -> int:
     base_url = f"http://{args.host}:{args.port}"
     print(f"Starting llama.cpp server for {args.model}", flush=True)
@@ -730,20 +850,61 @@ def run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_ocr(args: argparse.Namespace) -> int:
+    try:
+        result = read_active_window_text(args)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        output = json.dumps(
+            {
+                "app": result.app,
+                "title": result.title,
+                "text": result.text,
+                "lines": result.lines,
+                "screenshot": result.screenshot,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    else:
+        output = result.text
+
+    if str(args.output) == "-":
+        print(output)
+        return 0
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(output + "\n", encoding="utf-8")
+    print(f"Wrote {args.output}")
+    return 0
+
+
 def main() -> int:
-    if len(sys.argv) == 1 or sys.argv[1] != "report":
+    if len(sys.argv) == 1:
         parser = argparse.ArgumentParser(description="Watch your active window and log local activity labels.")
         add_watch_args(parser)
         args = parser.parse_args()
         return run_watch(args)
 
-    parser = argparse.ArgumentParser(description="Generate deterministic Markdown reports from activity JSONL logs.")
     subcommand = sys.argv[1]
-    if subcommand != "report":
-        parser.error(f"unknown command: {subcommand}")
-    add_report_args(parser)
-    args = parser.parse_args(sys.argv[2:])
-    return run_report(args)
+    if subcommand == "report":
+        parser = argparse.ArgumentParser(description="Generate deterministic Markdown reports from activity JSONL logs.")
+        add_report_args(parser)
+        args = parser.parse_args(sys.argv[2:])
+        return run_report(args)
+    if subcommand == "ocr":
+        parser = argparse.ArgumentParser(description="Extract text from the active macOS window with local Vision OCR.")
+        add_ocr_args(parser)
+        args = parser.parse_args(sys.argv[2:])
+        return run_ocr(args)
+
+    parser = argparse.ArgumentParser(description="Watch your active window and log local activity labels.")
+    add_watch_args(parser)
+    args = parser.parse_args()
+    return run_watch(args)
 
 
 if __name__ == "__main__":
