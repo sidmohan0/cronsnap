@@ -115,13 +115,23 @@ def find_frontmost_window_id(app: str, title: str) -> Optional[int]:
     return best_id
 
 
-def capture_screenshot(window: ActiveWindow, out_dir: Path) -> Path:
+def capture_screenshot(window: ActiveWindow, out_dir: Path, allow_full_screen: bool = False) -> Path:
+    if platform.system() != "Darwin":
+        raise RuntimeError("idefics-screen currently requires macOS because it uses screencapture.")
+
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "idefics-active-window.png"
 
     command = ["screencapture", "-x"]
-    if platform.system() == "Darwin" and window.window_id is not None:
+
+    if window.window_id is not None:
         command.extend(["-l", str(window.window_id)])
+    elif not allow_full_screen:
+        raise RuntimeError(
+            "Could not identify the active window ID; refusing to capture the full screen. "
+            "Install/enable Quartz support or pass --allow-full-screen-capture."
+        )
+
     command.append(str(path))
 
     result = subprocess.run(command, check=False, capture_output=True, text=True)
@@ -221,6 +231,11 @@ def main() -> int:
         action="store_true",
         help="Keep each screenshot in a temporary directory instead of overwriting one file.",
     )
+    parser.add_argument(
+        "--allow-full-screen-capture",
+        action="store_true",
+        help="Allow fallback to full-screen screenshots if active-window capture is unavailable.",
+    )
     args = parser.parse_args()
 
     print(f"Loading {args.model_id}. This can take a while for the first run.", flush=True)
@@ -233,7 +248,11 @@ def main() -> int:
             while True:
                 started = time.time()
                 window = get_active_window_metadata()
-                image_path = capture_screenshot(window, out_dir)
+                image_path = capture_screenshot(
+                    window,
+                    out_dir,
+                    allow_full_screen=args.allow_full_screen_capture,
+                )
 
                 if args.keep_screenshots:
                     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

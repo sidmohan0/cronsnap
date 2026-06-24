@@ -183,13 +183,23 @@ def get_active_window_metadata() -> ActiveWindow:
     return ActiveWindow(app=app or "unknown app", title=title or "", window_id=find_frontmost_window_id(app, title))
 
 
-def capture_screenshot(window: ActiveWindow, out_dir: Path) -> Path:
+def capture_screenshot(window: ActiveWindow, out_dir: Path, allow_full_screen: bool = False) -> Path:
+    if platform.system() != "Darwin":
+        raise RuntimeError("llama-screen currently requires macOS because it uses screencapture.")
+
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "active-window.png"
 
     command = ["screencapture", "-x"]
-    if platform.system() == "Darwin" and window.window_id is not None:
+
+    if window.window_id is not None:
         command.extend(["-l", str(window.window_id)])
+    elif not allow_full_screen:
+        raise RuntimeError(
+            "Could not identify the active window ID; refusing to capture the full screen. "
+            "Install/enable Quartz support or pass --allow-full-screen-capture."
+        )
+
     command.append(str(path))
 
     result = subprocess.run(command, check=False, capture_output=True, text=True)
@@ -600,6 +610,11 @@ def add_watch_args(parser: argparse.ArgumentParser) -> None:
         help="Directory for daily JSONL activity logs. Use --no-log to disable.",
     )
     parser.add_argument("--no-log", action="store_true", help="Print activity but do not write JSONL logs.")
+    parser.add_argument(
+        "--allow-full-screen-capture",
+        action="store_true",
+        help="Allow fallback to full-screen screenshots if active-window capture is unavailable.",
+    )
     parser.add_argument("--verbose-llama", action="store_true")
 
 
@@ -637,7 +652,11 @@ def run_watch(args: argparse.Namespace) -> int:
                     if rule_label:
                         activity, source = rule_label, "rule"
                     else:
-                        image_path = capture_screenshot(window, out_dir)
+                        image_path = capture_screenshot(
+                            window,
+                            out_dir,
+                            allow_full_screen=args.allow_full_screen_capture,
+                        )
                         activity, source = infer_activity(base_url, image_path, window, args), "model"
                     now_dt = datetime.now()
                     if not args.no_log:
