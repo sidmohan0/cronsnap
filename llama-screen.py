@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
@@ -618,11 +618,49 @@ def add_watch_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--verbose-llama", action="store_true")
 
 
+def activity_log_path(day: datetime) -> Path:
+    return Path(__file__).resolve().parent / "logs" / f"activity-{day.strftime('%Y-%m-%d')}.jsonl"
+
+
+def activity_report_path(day: datetime) -> Path:
+    return Path(__file__).resolve().parent / "reports" / f"activity-{day.strftime('%Y-%m-%d')}.md"
+
+
+def resolve_report_args(args: argparse.Namespace) -> None:
+    today = datetime.now()
+    yesterday = today - timedelta(days=1)
+    shortcuts = {
+        "today": today,
+        "yesterday": yesterday,
+    }
+
+    if not args.inputs:
+        args.files = [activity_log_path(today)]
+        if args.output is None:
+            args.output = activity_report_path(today)
+        return
+
+    files = []
+    report_day = None
+    for item in args.inputs:
+        day = shortcuts.get(item.lower())
+        if day is None:
+            files.append(Path(item))
+            continue
+        files.append(activity_log_path(day))
+        report_day = day
+
+    args.files = files
+    if args.output is None:
+        args.output = activity_report_path(report_day) if report_day and len(files) == 1 else Path("-")
+
+
 def add_report_args(parser: argparse.ArgumentParser) -> None:
-    today = datetime.now().strftime("%Y-%m-%d")
-    default_log = Path(__file__).resolve().parent / "logs" / f"activity-{today}.jsonl"
-    default_report = Path(__file__).resolve().parent / "reports" / f"activity-{today}.md"
-    parser.add_argument("files", nargs="*", type=Path, default=[default_log], help="JSONL log file(s) to summarize.")
+    parser.add_argument(
+        "inputs",
+        nargs="*",
+        help="JSONL log file(s) to summarize, or date shortcuts: today, yesterday.",
+    )
     parser.add_argument("--interval", type=float, default=10.0, help="Default seconds for the final sample.")
     parser.add_argument("--max-gap-seconds", type=float, default=30.0, help="Cap time credited across logging gaps.")
     parser.add_argument("--min-session-seconds", type=float, default=60.0, help="Minimum session length shown in timeline.")
@@ -630,7 +668,7 @@ def add_report_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--session-limit", type=int, default=20, help="Timeline session rows to show.")
     parser.add_argument("--include-low-signal", action="store_true", help="Include low-signal labels in calculations.")
     parser.add_argument("--exclude-monitoring", action="store_true", help="Exclude watcher/monitoring time.")
-    parser.add_argument("--output", type=Path, default=default_report, help="Markdown report path. Use '-' for stdout.")
+    parser.add_argument("--output", type=Path, default=None, help="Markdown report path. Use '-' for stdout.")
 
 
 def run_watch(args: argparse.Namespace) -> int:
@@ -680,6 +718,7 @@ def run_watch(args: argparse.Namespace) -> int:
 
 
 def run_report(args: argparse.Namespace) -> int:
+    resolve_report_args(args)
     report = generate_report(args)
     if str(args.output) == "-":
         print(report)
