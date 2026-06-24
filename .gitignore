@@ -1,0 +1,17 @@
+# Generated activity data
+logs/
+reports/
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.*
+
+# macOS metadata
+.DS_Store
