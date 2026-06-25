@@ -16,12 +16,12 @@
         "title": "CronSnap",
         "width": 960,
         "height": 760,
-        "visible": false,
+        "visible": true,
         "resizable": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {

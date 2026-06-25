@@ -7,7 +7,7 @@ use std::{
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    ActivationPolicy, AppHandle, Emitter, Manager, State,
+    AppHandle, Emitter, Manager, State,
 };
 
 struct WatcherState {
@@ -73,8 +73,15 @@ fn run_engine_json(app: &AppHandle, args: &[&str]) -> Result<Value, String> {
 
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_always_on_top(true);
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
+        let window_for_reset = window.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            let _ = window_for_reset.set_always_on_top(false);
+        });
     }
 }
 
@@ -208,8 +215,8 @@ pub fn run() {
             child: Mutex::new(None),
         })
         .setup(|app| {
-            app.set_activation_policy(ActivationPolicy::Accessory);
             setup_tray(app)?;
+            show_main(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

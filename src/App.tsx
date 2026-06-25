@@ -1,5 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   CalendarDays,
@@ -73,6 +71,16 @@ type OcrPayload = {
 
 const emptyArchive: ArchivePayload = { data_dir: "", days: [] };
 
+async function invokeTauri<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(command, args);
+}
+
+async function listenTauri<T>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<T>(event, handler);
+}
+
 function formatError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -98,8 +106,8 @@ export default function App() {
   const refresh = useCallback(async () => {
     try {
       const [nextStatus, nextArchive] = await Promise.all([
-        invoke<Status>("engine_status"),
-        invoke<ArchivePayload>("engine_archive", { days: 21 }),
+        invokeTauri<Status>("engine_status"),
+        invokeTauri<ArchivePayload>("engine_archive", { days: 21 }),
       ]);
       setStatus(nextStatus);
       setArchive(nextArchive);
@@ -114,10 +122,10 @@ export default function App() {
     refresh();
     const interval = window.setInterval(refresh, 30000);
     const unlisteners = [
-      listen("cronsnap://refresh", refresh),
-      listen("cronsnap://ocr", () => runOcr()),
-      listen("cronsnap://settings", () => setShowSettings(true)),
-      listen<boolean>("cronsnap://watching", (event) => setWatching(event.payload)),
+      listenTauri("cronsnap://refresh", refresh),
+      listenTauri("cronsnap://ocr", () => runOcr()),
+      listenTauri("cronsnap://settings", () => setShowSettings(true)),
+      listenTauri<boolean>("cronsnap://watching", (event) => setWatching(event.payload)),
     ];
     return () => {
       window.clearInterval(interval);
@@ -129,7 +137,7 @@ export default function App() {
     setBusy(true);
     setMessage("Reading active window...");
     try {
-      const result = await invoke<OcrPayload>("engine_ocr", {
+      const result = await invokeTauri<OcrPayload>("engine_ocr", {
         allowFullScreenCapture,
       });
       setOcr(result);
@@ -145,7 +153,7 @@ export default function App() {
     setBusy(true);
     setMessage(`Generating ${day} report...`);
     try {
-      await invoke("engine_report", { day });
+      await invokeTauri("engine_report", { day });
       await refresh();
       setMessage(`${day[0].toUpperCase()}${day.slice(1)} report exported`);
     } catch (error) {
@@ -157,7 +165,7 @@ export default function App() {
 
   async function openDataDir() {
     try {
-      await invoke("open_data_dir");
+      await invokeTauri("open_data_dir");
     } catch (error) {
       setMessage(formatError(error));
     }
@@ -167,11 +175,11 @@ export default function App() {
     setBusy(true);
     try {
       if (watching) {
-        await invoke("stop_watcher");
+        await invokeTauri("stop_watcher");
         setWatching(false);
         setMessage("Watcher paused");
       } else {
-        await invoke("start_watcher");
+        await invokeTauri("start_watcher");
         setWatching(true);
         setMessage("Watcher started");
       }

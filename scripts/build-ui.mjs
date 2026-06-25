@@ -1,9 +1,37 @@
-<!doctype html>
+import * as esbuild from "esbuild";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+
+await rm("dist", { recursive: true, force: true });
+await mkdir("dist/assets", { recursive: true });
+
+await esbuild.build({
+  entryPoints: ["src/main.tsx"],
+  bundle: true,
+  format: "iife",
+  globalName: "CronSnapApp",
+  outfile: "dist/assets/app.js",
+  jsx: "automatic",
+  loader: {
+    ".css": "css",
+  },
+  minify: true,
+  sourcemap: false,
+  target: ["safari15"],
+  logLevel: "info",
+});
+
+const css = await readFile("dist/assets/app.css", "utf8");
+const js = await readFile("dist/assets/app.js", "utf8");
+
+await writeFile(
+  "dist/index.html",
+  `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CronSnap</title>
+    <style>${css}</style>
   </head>
   <body>
     <div id="root">
@@ -23,6 +51,9 @@
         if (status) status.textContent = "Startup error: " + String(event.reason);
       });
     </script>
-    <script type="module" src="/src/main.tsx"></script>
+    <script>${js}</script>
   </body>
 </html>
+`,
+  "utf8",
+);
