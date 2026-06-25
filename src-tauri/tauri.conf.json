@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CronSnap",
+  "version": "0.1.0",
+  "identifier": "com.sidmohan.cronsnap",
+  "build": {
+    "beforeDevCommand": "npm run dev:ui",
+    "beforeBuildCommand": "npm run build:ui",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CronSnap",
+        "width": 960,
+        "height": 760,
+        "visible": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": ["../llama-screen.py"]
+  }
+}

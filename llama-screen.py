@@ -30,12 +30,54 @@ import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 
 MODEL_REPO = "ggml-org/SmolVLM2-2.2B-Instruct-GGUF"
+APP_NAME = "CronSnap"
+APP_DATA_ENV = "CRONSNAP_DATA_DIR"
+
+
+def app_data_dir() -> Path:
+    configured = os.environ.get(APP_DATA_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    if platform.system() == "Darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    return Path.home() / ".cronsnap"
+
+
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def logs_dir() -> Path:
+    return app_data_dir() / "logs"
+
+
+def reports_dir() -> Path:
+    return app_data_dir() / "reports"
+
+
+def ensure_app_data() -> None:
+    logs_dir().mkdir(parents=True, exist_ok=True)
+    reports_dir().mkdir(parents=True, exist_ok=True)
+
+    legacy_logs = script_dir() / "logs"
+    if legacy_logs.exists() and not any(logs_dir().glob("activity-*.jsonl")):
+        for source in legacy_logs.glob("activity-*.jsonl"):
+            target = logs_dir() / source.name
+            if not target.exists():
+                shutil.copyfile(source, target)
+
+    legacy_reports = script_dir() / "reports"
+    if legacy_reports.exists() and not any(reports_dir().glob("activity-*.md")):
+        for source in legacy_reports.glob("activity-*.md"):
+            target = reports_dir() / source.name
+            if not target.exists():
+                shutil.copyfile(source, target)
 
 
 @dataclass
@@ -635,7 +677,7 @@ def session_rows(sessions: list[dict], limit: int) -> list[list[str]]:
     return rows
 
 
-def generate_report(args: argparse.Namespace) -> str:
+def summarize_records(args: argparse.Namespace) -> dict:
     records = load_records(args.files)
     totals, samples = aggregate_records(
         records,
@@ -652,28 +694,99 @@ def generate_report(args: argparse.Namespace) -> str:
         last = records[-1]["_ts"].date()
         date_label = str(first) if first == last else f"{first} to {last}"
 
+    app_rows = top_rows(totals["app"], total_seconds, args.limit)
+    activity_rows = top_rows(totals["activity"], total_seconds, args.limit)
+    source_rows = top_rows(totals["source"], total_seconds, args.limit)
+    windows = [
+        {
+            "app": app,
+            "title": display_title(title),
+            "seconds": seconds,
+            "duration": seconds_to_hm(seconds),
+        }
+        for (app, title), seconds in sorted(totals["window"].items(), key=lambda item: item[1], reverse=True)[
+            : args.limit
+        ]
+    ]
+    session_items = [
+        {
+            "start": session["start"].isoformat(timespec="seconds"),
+            "end": session["end"].isoformat(timespec="seconds"),
+            "start_time": session["start"].strftime("%H:%M:%S"),
+            "end_time": session["end"].strftime("%H:%M:%S"),
+            "app": session["app"],
+            "activity": session["activity"],
+            "title": session["title"],
+            "seconds": session["seconds"],
+            "duration": seconds_to_hm(session["seconds"]),
+        }
+        for session in sessions[: args.session_limit]
+    ]
+    return {
+        "date_label": date_label,
+        "files": [str(path) for path in args.files],
+        "samples_read": len(records),
+        "samples_included": len(samples),
+        "accounted_seconds": total_seconds,
+        "accounted": seconds_to_hm(total_seconds),
+        "max_gap_seconds": args.max_gap_seconds,
+        "apps": [
+            {"name": row[0], "duration": row[1], "share": row[2], "seconds": totals["app"][row[0]]}
+            for row in app_rows
+        ],
+        "activities": [
+            {"name": row[0], "duration": row[1], "share": row[2], "seconds": totals["activity"][row[0]]}
+            for row in activity_rows
+        ],
+        "windows": windows,
+        "sources": [
+            {"name": row[0], "duration": row[1], "share": row[2], "seconds": totals["source"][row[0]]}
+            for row in source_rows
+        ],
+        "sessions": session_items,
+    }
+
+
+def generate_report(args: argparse.Namespace) -> str:
+    summary = summarize_records(args)
+
     lines = [
-        f"# Activity Report: {date_label}",
+        f"# Activity Report: {summary['date_label']}",
         "",
-        f"- Samples read: {len(records)}",
-        f"- Samples included: {len(samples)}",
-        f"- Accounted time: {seconds_to_hm(total_seconds)}",
+        f"- Samples read: {summary['samples_read']}",
+        f"- Samples included: {summary['samples_included']}",
+        f"- Accounted time: {summary['accounted']}",
         f"- Gap cap: {seconds_to_hm(args.max_gap_seconds)}",
         "",
         "## Time By App",
-        markdown_table(["App", "Time", "Share"], top_rows(totals["app"], total_seconds, args.limit)),
+        markdown_table(["App", "Time", "Share"], [[row["name"], row["duration"], row["share"]] for row in summary["apps"]]),
         "",
         "## Time By Activity",
-        markdown_table(["Activity", "Time", "Share"], top_rows(totals["activity"], total_seconds, args.limit)),
+        markdown_table(
+            ["Activity", "Time", "Share"],
+            [[row["name"], row["duration"], row["share"]] for row in summary["activities"]],
+        ),
         "",
         "## Top Windows",
-        markdown_table(["App", "Window", "Time"], window_rows(totals["window"], args.limit)),
+        markdown_table(
+            ["App", "Window", "Time"],
+            [[row["app"], row["title"], row["duration"]] for row in summary["windows"]],
+        ),
         "",
         "## Source Mix",
-        markdown_table(["Source", "Time", "Share"], top_rows(totals["source"], total_seconds, args.limit)),
+        markdown_table(
+            ["Source", "Time", "Share"],
+            [[row["name"], row["duration"], row["share"]] for row in summary["sources"]],
+        ),
         "",
         "## Timeline Sessions",
-        markdown_table(["Time", "App", "Activity", "Duration"], session_rows(sessions, args.session_limit)),
+        markdown_table(
+            ["Time", "App", "Activity", "Duration"],
+            [
+                [f"{row['start_time']} - {row['end_time']}", row["app"], row["activity"], row["duration"]]
+                for row in summary["sessions"]
+            ],
+        ),
         "",
     ]
     return "\n".join(lines)
@@ -695,7 +808,7 @@ def add_watch_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log-dir",
         type=Path,
-        default=Path(__file__).resolve().parent / "logs",
+        default=logs_dir(),
         help="Directory for daily JSONL activity logs. Use --no-log to disable.",
     )
     parser.add_argument("--no-log", action="store_true", help="Print activity but do not write JSONL logs.")
@@ -708,11 +821,11 @@ def add_watch_args(parser: argparse.ArgumentParser) -> None:
 
 
 def activity_log_path(day: datetime) -> Path:
-    return Path(__file__).resolve().parent / "logs" / f"activity-{day.strftime('%Y-%m-%d')}.jsonl"
+    return logs_dir() / f"activity-{day.strftime('%Y-%m-%d')}.jsonl"
 
 
 def activity_report_path(day: datetime) -> Path:
-    return Path(__file__).resolve().parent / "reports" / f"activity-{day.strftime('%Y-%m-%d')}.md"
+    return reports_dir() / f"activity-{day.strftime('%Y-%m-%d')}.md"
 
 
 def resolve_report_args(args: argparse.Namespace) -> None:
@@ -757,6 +870,7 @@ def add_report_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--session-limit", type=int, default=20, help="Timeline session rows to show.")
     parser.add_argument("--include-low-signal", action="store_true", help="Include low-signal labels in calculations.")
     parser.add_argument("--exclude-monitoring", action="store_true", help="Exclude watcher/monitoring time.")
+    parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--output", type=Path, default=None, help="Markdown report path. Use '-' for stdout.")
 
 
@@ -791,7 +905,82 @@ def add_ocr_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", type=Path, default=Path("-"), help="OCR output path. Use '-' for stdout.")
 
 
+def add_archive_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--days", type=int, default=21, help="Number of recent days to include.")
+    parser.add_argument("--limit", type=int, default=10, help="Rows to show in top tables.")
+    parser.add_argument("--session-limit", type=int, default=40, help="Timeline session rows per day.")
+    parser.add_argument("--interval", type=float, default=10.0)
+    parser.add_argument("--max-gap-seconds", type=float, default=30.0)
+    parser.add_argument("--min-session-seconds", type=float, default=60.0)
+    parser.add_argument("--include-low-signal", action="store_true")
+    parser.add_argument("--exclude-monitoring", action="store_true")
+
+
+def status_payload() -> dict:
+    ensure_app_data()
+    today = datetime.now()
+    log = activity_log_path(today)
+    sample_count = 0
+    last_sample = None
+    if log.exists():
+        records = load_records([log])
+        sample_count = len(records)
+        if records:
+            last = records[-1]
+            last_sample = {
+                "ts": last.get("ts"),
+                "app": last.get("app"),
+                "title": last.get("title"),
+                "activity": last.get("activity"),
+                "source": last.get("source"),
+            }
+    return {
+        "app": APP_NAME,
+        "data_dir": str(app_data_dir()),
+        "logs_dir": str(logs_dir()),
+        "reports_dir": str(reports_dir()),
+        "today": today.date().isoformat(),
+        "today_log": str(log),
+        "today_samples": sample_count,
+        "last_sample": last_sample,
+    }
+
+
+def day_summary(day: date, args: argparse.Namespace) -> Optional[dict]:
+    ensure_app_data()
+    log = logs_dir() / f"activity-{day.isoformat()}.jsonl"
+    if not log.exists():
+        return None
+    ns = argparse.Namespace(
+        files=[log],
+        interval=args.interval,
+        max_gap_seconds=args.max_gap_seconds,
+        min_session_seconds=args.min_session_seconds,
+        limit=args.limit,
+        session_limit=args.session_limit,
+        include_low_signal=args.include_low_signal,
+        exclude_monitoring=args.exclude_monitoring,
+    )
+    summary = summarize_records(ns)
+    summary["date"] = day.isoformat()
+    return summary
+
+
+def archive_payload(args: argparse.Namespace) -> dict:
+    today = datetime.now().date()
+    days = []
+    for offset in range(args.days):
+        summary = day_summary(today - timedelta(days=offset), args)
+        if summary:
+            days.append(summary)
+    return {
+        "data_dir": str(app_data_dir()),
+        "days": days,
+    }
+
+
 def run_watch(args: argparse.Namespace) -> int:
+    ensure_app_data()
     base_url = f"http://{args.host}:{args.port}"
     print(f"Starting llama.cpp server for {args.model}", flush=True)
     server = start_llama_server(args)
@@ -838,8 +1027,9 @@ def run_watch(args: argparse.Namespace) -> int:
 
 
 def run_report(args: argparse.Namespace) -> int:
+    ensure_app_data()
     resolve_report_args(args)
-    report = generate_report(args)
+    report = json.dumps(summarize_records(args), ensure_ascii=False, indent=2) if args.format == "json" else generate_report(args)
     if str(args.output) == "-":
         print(report)
         return 0
@@ -847,6 +1037,16 @@ def run_report(args: argparse.Namespace) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")
     print(f"Wrote {args.output}")
+    return 0
+
+
+def run_status(args: argparse.Namespace) -> int:
+    print(json.dumps(status_payload(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_archive(args: argparse.Namespace) -> int:
+    print(json.dumps(archive_payload(args), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -900,6 +1100,15 @@ def main() -> int:
         add_ocr_args(parser)
         args = parser.parse_args(sys.argv[2:])
         return run_ocr(args)
+    if subcommand == "status":
+        parser = argparse.ArgumentParser(description="Print local CronSnap status as JSON.")
+        args = parser.parse_args(sys.argv[2:])
+        return run_status(args)
+    if subcommand == "archive":
+        parser = argparse.ArgumentParser(description="Print recent CronSnap archive summaries as JSON.")
+        add_archive_args(parser)
+        args = parser.parse_args(sys.argv[2:])
+        return run_archive(args)
 
     parser = argparse.ArgumentParser(description="Watch your active window and log local activity labels.")
     add_watch_args(parser)
