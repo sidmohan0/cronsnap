@@ -505,6 +505,8 @@ def parse_ts(value: str) -> datetime:
 def load_records(paths: Iterable[Path]) -> list[dict]:
     records = []
     for path in paths:
+        if not path.exists():
+            continue
         with path.open("r", encoding="utf-8") as file:
             for line_number, line in enumerate(file, start=1):
                 line = line.strip()
@@ -677,6 +679,20 @@ def session_rows(sessions: list[dict], limit: int) -> list[list[str]]:
     return rows
 
 
+def date_label_from_paths(paths: Iterable[Path]) -> str:
+    labels = []
+    for path in paths:
+        match = re.search(r"activity-(\d{4}-\d{2}-\d{2})\.jsonl$", path.name)
+        if match:
+            labels.append(match.group(1))
+    labels = sorted(set(labels))
+    if len(labels) == 1:
+        return labels[0]
+    if labels:
+        return f"{labels[0]} to {labels[-1]}"
+    return "multiple days"
+
+
 def summarize_records(args: argparse.Namespace) -> dict:
     records = load_records(args.files)
     totals, samples = aggregate_records(
@@ -688,7 +704,7 @@ def summarize_records(args: argparse.Namespace) -> dict:
     )
     sessions = build_sessions(samples, args.min_session_seconds, args.max_gap_seconds)
     total_seconds = sum(totals["app"].values())
-    date_label = "multiple days"
+    date_label = date_label_from_paths(args.files)
     if records:
         first = records[0]["_ts"].date()
         last = records[-1]["_ts"].date()
